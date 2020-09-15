@@ -1,0 +1,184 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+# necessary packages --------
+
+library(tidyverse)
+library(readxl)
+library(stringr)
+
+# functions -----------------
+
+num_extract <- function(string){ 
+  str_extract(string, "\\-*\\d+\\.*\\d*")
+} 
+total_fertility_rate <- function(fertility_rate) {
+  sum(fertility_rate)
+}
+# source: Statistisches Bundesamt, Sterbetafel 2015/2017 - Methoden
+life_expectancy <- function(x, survival_rate) {
+  l <- 100000 * c(1, cumprod(survival_rate))
+  L <- 0.5 * (l[1:(length(l) - 1)] + l[2:length(l)])
+  
+  sum(L[(x + 1):length(L)]) / l[x + 1]
+}
+
+
+get_leslie_matrix <- function(fertility_rate, survival_rate) {
+  rbind(fertility_rate,
+        cbind(diag(x = survival_rate), rep(x = 0, times = length(survival_rate))))
+}
+
+# data ----------------------
+
+path <- "C:/Users/Office/Dropbox/Universitaet/MOBS WS 1819/Projekt/p/mbs_1314_p2"
+
+stat_bundesamt_alt <- read_excel(file.path(path, "Vorhersage2060alt.xls"),
+                                  sheet = 1,
+                                  skip = 3,
+                                  col_names = FALSE)
+german_pop <- read_excel(file.path(path, "Zensus2011.xlsx"),
+                          sheet = 4,
+                          skip = 7,
+                          col_names = FALSE)
+
+male_life_table <- read_excel(file.path(path, "Sterbetafeln2010.xls"),
+                         col_names = FALSE, 
+                         skip = 14, 
+                         sheet = 2)
+
+female_life_table <- read_excel(file.path(path, "Sterbetafeln2010.xls"),
+                         col_names = FALSE, 
+                         skip = 14, 
+                         sheet = 3)
+fertility_table <- read_excel(file.path(path, "Geburtenziffern2001-2010.xls"),
+                                       col_names = FALSE,
+                                       skip = 5)
+
+
+# cleaning data -------------
+
+# All individuals over 100 years are summerized in AGE == 100
+stat_bundesamt_alt <- stat_bundesamt_alt[,1:2]
+colnames(stat_bundesamt_alt) <- c("Female_2060", "Male_2060")
+stat_bundesamt_alt$AGE <- 0:99
+
+german_pop <- german_pop[-c(seq(6, 120, by = 6), 122), c(1, 3, 4)]
+colnames(german_pop) <- c("AGE", "Male_2011", "Female_2011")
+german_pop[101, "AGE"] <- 1911
+german_pop[] <- lapply(german_pop, as.numeric)
+german_pop["AGE"] <- 2011 - german_pop["AGE"]
+
+male_life_table <- male_life_table[,c(1, 5, 6, 8)]
+colnames(male_life_table) <- c("x", "p", "l", "L")
+male_life_table <- filter(male_life_table, !is.na(p))
+
+female_life_table <- female_life_table[,c(1, 5, 6, 8)]
+colnames(female_life_table) <- c("x", "p", "l", "L")
+female_life_table <- filter(female_life_table, !is.na(p))
+
+fertility_table <- fertility_table[, c(1, 11)]
+colnames(fertility_table) <- c("AGE", "fertility_rate")
+fertility_table["AGE"] <- lapply(fertility_table["AGE"], num_extract)
+fertility_table <-  filter(fertility_table, !is.na(fertility_rate))
+```
+
+```{r}
+# Leslie model --------------
+n <- length(unique(german_pop$AGE))
+
+# No individuals get older than 100 years
+leslie_male   <- get_leslie_matrix(fertility_rate =  rep(x = 0, times = n),
+                                   survival_rate = male_life_table$p[1:(n - 1)])
+leslie_female <- get_leslie_matrix(fertility_rate =  c(rep(x = 0, times = 14),
+                                                       fertility_table$fertility_rate / 1000,
+                                                       rep(x = 0, times = n - 49)),
+                                   survival_rate = female_life_table$p[1:(n - 1)])
+
+
+
+# simulating future generations
+
+m <- 59
+life_expectancy_by_year <- vector(mode = "numeric", length = m)
+fertility_rate_by_year <- vector(mode = "numeric", length = m)
+
+for (i in seq_len(m)) {
+  male_survival_rate <- male_life_table$p[1:(n - 1)] + i * 0.0000806
+  male_fertility_rate <- rep(x = 0, times = n)
+  
+  female_survival_rate <- female_life_table$p[1:(n - 1)] + i * 0.0000472
+  female_fertility_rate <- c(rep(x = 0, times = 14), (fertility_table$fertility_rate - 0.38 * min(i, 14) ) / 1000, rep(x = 0, times = n - 49))
+  
+  leslie_male   <- get_leslie_matrix(fertility_rate =  male_fertility_rate, survival_rate = male_survival_rate)
+  leslie_female <- get_leslie_matrix(fertility_rate =  female_fertility_rate, survival_rate = female_survival_rate)
+
+  male_current <- paste("Male_", 2010 + i, sep = "")
+  male_next <- paste("Male_", 2011 + i, sep = "")
+  female_current <- paste("Female_", 2010 + i, sep = "")
+  female_next <- paste("Female_", 2011 + i, sep = "")
+  
+  
+  
+  german_pop[[female_next]] <- leslie_female %*% german_pop[[female_current]]
+  german_pop[[male_next]] <- leslie_male %*% german_pop[[male_current]]
+  
+  # equal amount of males and females are born
+  german_pop[female_next][1, 1] <- 0.5 * german_pop[female_next][1, 1]
+  german_pop[male_next][1, 1] <- german_pop[female_next][1, 1]
+  
+  # immigration
+  
+  german_pop[female_next] <- german_pop[female_next] + 
+                            c(rep(7000 / 20, 20), rep(25000 / 20, 20), rep(0, 25), rep(-3000 / 35, 35)) + 33 * min(i, 9)
+                             
+  
+  german_pop[male_next] <- german_pop[male_next] + 
+                            c(rep(4000 / 20, 20), rep(18000 / 20, 20), rep(-5000 / 25, 25), rep(-5000 / 35, 35)) + 33 * min(i, 9)
+
+  
+
+  fertility_rate_by_year[i] <- sum(female_fertility_rate / 1000)
+  
+}
+
+```
+
+
+```{r}
+
+# plots ---------------------
+
+german_pop <- gather(data = german_pop, YEAR, POP, -AGE)
+german_pop <- separate(german_pop, col = YEAR, into = c("SEX", "YEAR"), sep = "_")
+
+stat_bundesamt_alt <- gather(data = stat_bundesamt_alt , YEAR, POP, -AGE)
+stat_bundesamt_alt  <- separate(stat_bundesamt_alt, col = YEAR, into = c("SEX", "YEAR"), sep = "_")
+stat_bundesamt_alt[stat_bundesamt_alt$SEX == "Male",]$POP <- -stat_bundesamt_alt[stat_bundesamt_alt$SEX == "Male",]$POP 
+data <- subset(german_pop, YEAR == 2060)
+data[data$SEX == "Male", ]$POP <- -data[data$SEX == "Male", ]$POP
+p <- ggplot(data, aes(x = AGE, y = POP, fill = SEX, width = 1)) +
+      coord_flip() +
+      geom_bar(data = data[data$SEX == "Female",], stat = "identity") +
+      geom_bar(data = data[data$SEX == "Male",], stat = "identity") 
+print(p)
+
+q <- ggplot(stat_bundesamt_alt, aes(x = AGE, y = POP, fill = SEX, width = 1)) +
+      coord_flip() +
+      geom_bar(data = stat_bundesamt_alt[stat_bundesamt_alt$SEX == "Female",], stat = "identity") +
+      geom_bar(data = stat_bundesamt_alt[stat_bundesamt_alt$SEX == "Male",], stat = "identity") 
+print(q)
+
+```
+
+# Szenario 2 - Beschreibung
+Die Sterberaten wurden durch die Addition eines konstanten Faktors erhöht. Bis zum Jahr 2060 wurde dieser Faktor so skaliert, dass die Lebenserwartung für Frauen 91.2 Jahre und für Männer 91.2 Jahre beträgt. Der Faktor für die Männer ist 0.0000806 und der Faktor für die Frauen ist 0.0000472. Analog wurde die Geburtenrate modifiziert, sodass im Jahr 2025 eine Geburtenhäufigkeit von 1.2 Kindern pro Frau vorliegt. Die Migration findet durch die Addtion eines Vektors statt, der nach verschiedenen Altersgruppen aufgeteilt ist. Um einen Anstieg der Migration zu simulieren wurde jeder Eintrag bis 2020 durch einen konstanten Faktor erhöht.
+Bei der ersten Betrachtung der beiden Bevölkerungspyramiden fällt auf, dass bei unserer Vorherage eine Lücke in den Daten vorliegt. Die Zensus-Daten aus dem Jahr 2011 geben den Bevökerungsstand nicht korrekt wieder. Außerdem ist in der Prognose von statistischen Bundesamt eine größere Ausprägungen in den alteren Generationen zu sehen. 
+
+## Vergleich Szenario 1 und Szenario 2
+In Szenario 2 ist ein sehr starkes Abflachen im unteren Bereich der Pyramide zu beobachten. Dies deutet auf eine aussterbende Bevölkerung hin. In Szenario 1 findet auch ein Abflachen statt, aber diese ist nicht so stark wie in Szenario 1. Die Spitzen der Pyramiden sind fasst identisch. 
